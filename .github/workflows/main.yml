@@ -31,33 +31,57 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
-      - name: Decode debug and release keystores
+      - name: Decode and verify keystores
         id: keystores
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_SIGNING_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_ALIAS }}
         run: |
           if [ -f debug.keystore.base64 ]; then
             tr -d '[:space:]' < debug.keystore.base64 | base64 -d > debug.keystore
           elif [ ! -f debug.keystore ]; then
-            keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+            keytool -genkeypair -noprompt -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
           if [ -n "$KEYSTORE_BASE64" ]; then
             printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "${{ github.workspace }}/my-upload-key.jks"
+            keytool -list -keystore "${{ github.workspace }}/my-upload-key.jks" -storepass "$STORE_PASSWORD" -alias "${KEY_ALIAS:-upload}" > /dev/null
             echo "has_release=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_release=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run unit tests and build Debug APK
-        run: gradle :app:testDebugUnitTest :app:assembleDebug --no-daemon
+      - name: Build Debug APK
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug --no-daemon --console=plain 2>&1 | tee /tmp/debug-build.log || {
+            echo "::error::Debug APK build failed. Last 50 lines:"
+            tail -n 50 /tmp/debug-build.log
+            exit 1
+          }
 
-      - name: Build signed Release APK and AAB
+      - name: Run Unit Tests
+        run: |
+          set -o pipefail
+          gradle :app:testDebugUnitTest --no-daemon --console=plain 2>&1 | tee /tmp/test-build.log || {
+            echo "::error::Unit tests failed. Last 50 lines:"
+            tail -n 50 /tmp/test-build.log
+            exit 1
+          }
+
+      - name: Build Signed Release APK and AAB
         if: steps.keystores.outputs.has_release == 'true'
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
           STORE_PASSWORD: ${{ secrets.RELEASE_SIGNING_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
-        run: gradle :app:assembleRelease :app:bundleRelease --no-daemon
+        run: |
+          set -o pipefail
+          gradle :app:assembleRelease :app:bundleRelease --no-daemon --console=plain 2>&1 | tee /tmp/release-build.log || {
+            echo "::error::Release build failed. Last 50 lines:"
+            tail -n 50 /tmp/release-build.log
+            exit 1
+          }
 
       - name: Upload Debug APK artifact
         uses: actions/upload-artifact@v4
@@ -76,6 +100,14 @@ jobs:
             app/build/outputs/bundle/release/*.aab
           if-no-files-found: error
 
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: app/build/reports/tests/
+          if-no-files-found: ignore
+
       - name: Clean up temporary keystores
         if: always()
-        run: rm -f "${{ github.workspace }}/my-upload-key.jks" debug.keystore
+        run: rm -f "${{ github.workspace }}/my-upload-key.jks" debug.keystore /tmp/*-build.log
