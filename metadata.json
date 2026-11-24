@@ -1,0 +1,6 @@
+{
+  "name": "Human Atlas",
+  "description": "Interactive offline 3D human anatomy explorer with exploded views, system filters, and local study bookmarks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
